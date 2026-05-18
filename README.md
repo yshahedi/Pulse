@@ -90,3 +90,89 @@ Pulse is designed so that even junior JavaScript developers can work effectively
   - Works well alongside existing CI/CD pipelines.
   - Configuration via simple files/environment variables (see Configuration section).
 
+# Pulse Runtime API
+
+Pulse provides a lightweight runtime environment for executing JavaScript services and dynamically managing servers, APIs, schedulers, and external services.
+
+This document describes:
+
+- CLI commands
+- JavaScript runtime helper functions
+- `Serve()` runtime management API
+
+---
+
+## CLI Commands
+
+Pulse provides simple commands to control JavaScript service files.
+
+### Run a Service
+```bash
+pulse run <file_name>
+```
+
+### Stop a Service
+```bash
+pulse stop <file_name>
+```
+
+### Reload a Service
+```bash
+pulse reload <file_name>
+```
+
+---
+
+## JavaScript Runtime Functions
+
+Helper functions available inside Pulse JavaScript scripts.
+
+### Logging
+`Log(text)`: Writes a message to the Pulse log system.
+
+### File Operations
+- `Ls(path)`: Returns the list of files inside the specified directory.
+- `CreateFile(path, filename, content)`: Creates a file with the specified content.
+- `ReadFile(path)`: Returns file content as text.
+- `ReadFileBase64(path)`: Returns file content encoded as Base64.
+
+### System Commands
+`System(command)`: Executes a Linux command.
+Example: `System("ls -la")`
+
+### Service Invocation
+`CallService({ headers, id, request, path, token, callback })`: Used to call external or internal services (HTTP/WebSocket).
+
+### Context Storage
+- `GetContext(key)`: Returns the stored value.
+- `SetContext(key, value)`: Stores a value using the specified key.
+
+### Utility
+`Sleep(milliseconds)`: Pauses execution for the specified duration.
+
+---
+
+## Runtime Management API
+
+`Serve(action, data)` is used for dynamic orchestration.
+
+### Server Management
+- **Create Server:** `Serve('server', { port, is_ssl, certificate, private_key, transport_protocol })`
+- **Stop Server:** `Serve('stop_server', { id })`
+
+### Route Management
+- **Create Route:** `Serve('route', { file_name, route, server, timeout, method, schema })`
+- **Reload Route:** `Serve('reload', { file_name, id, server })`
+- **Remove Route:** `Serve('remove_route', { route, server })`
+
+### Function & Handler Management
+- **Functions:** `add_function`, `remove_function`, `update_function`
+- **Handlers:** `add_handler_function`, `remove_handler_function`
+
+### Scheduler
+- **Create Scheduler:** `Serve('set_scheduler', { timeout, interval, source })`
+- **Remove Scheduler:** `Serve('remove_scheduler', { id })`
+
+### System Reload
+- `Serve('reload', {})`: Reloads main JS, services, APIs, and schedulers.
+
