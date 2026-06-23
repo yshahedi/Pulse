@@ -37,6 +37,16 @@ using namespace std;
 
 namespace PULSE
 {
+    using JsonValue = std::variant<
+            std::nullptr_t,
+            std::string,
+            int64_t,
+            uint64_t,
+            double,
+            bool
+        >;
+
+
     struct PerSocketData
     {
         uint32_t userId;
@@ -328,7 +338,7 @@ namespace PULSE
     extern void Sleep(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void Time(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void Serve(const v8::FunctionCallbackInfo<v8::Value> &args);
-    extern rapidjson::Document runSqliteQuery(const std::string &db_file, const std::string &query);
+    extern rapidjson::Document runSqliteQuery(const std::string &db_file, const std::string &query, const std::vector<JsonValue> & values );
     extern sqlite3 * openSqliteDB(const std::string &db_file);
 
     class Inbound;

@@ -5,8 +5,8 @@
 #include <fstream>
 #include "MyEncryption.h"
 #include "MyString.h"
-#include "gpt.h"
-#include "deepseek.h"
+// #include "gpt.h"
+// #include "deepseek.h"
 
 #define QUEUET_TIMEOUT 10
 #define MAX_LISTENER 100
@@ -15,6 +15,22 @@
 
 namespace PULSE
 {
+
+    int debug_callback(CURL *handle, curl_infotype type, char *data, size_t size, void *userptr) {
+        const char *prefix;
+        switch (type) {
+            case CURLINFO_TEXT:        prefix = "* ";   break;
+            case CURLINFO_HEADER_OUT:  prefix = "=> ";  break;
+            case CURLINFO_HEADER_IN:   prefix = "<= ";  break;
+            case CURLINFO_DATA_OUT:    prefix = ">> ";  break;
+            case CURLINFO_DATA_IN:     prefix = "<< ";  break;
+            default: return 0;
+        }
+        std::string result = std::string(prefix) + std::string(data, size);
+        Logger::instance().log(Logger::Level::DEBUG, result);
+        return 0;
+}
+
 
     std::string urlEncode(const std::string &value)
     {
@@ -38,6 +54,42 @@ namespace PULSE
 
         return escaped.str();
     }
+
+    std::vector<JsonValue> rapidJsonArrayToVector(const rapidjson::Value& arr) {
+    std::vector<JsonValue> result;
+
+    if (!arr.IsArray()) {
+        throw std::runtime_error("Value is not an array");
+    }
+
+    result.reserve(arr.Size());
+
+    for (const auto& item : arr.GetArray()) {
+        if (item.IsNull()) {
+            result.emplace_back(nullptr);
+        }
+        else if (item.IsString()) {
+            result.emplace_back(std::string(item.GetString(), item.GetStringLength()));
+        }
+        else if (item.IsBool()) {
+            result.emplace_back(item.GetBool());
+        }
+        else if (item.IsInt64()) {
+            result.emplace_back(item.GetInt64());
+        }
+        else if (item.IsUint64()) {
+            result.emplace_back(item.GetUint64());
+        }
+        else if (item.IsDouble()) {
+            result.emplace_back(item.GetDouble());
+        }
+        else {
+            throw std::runtime_error("Unsupported JSON value type in array");
+        }
+    }
+
+    return result;
+}
 
     std::string jsonToQueryParamsEncoded(const std::string &jsonStr)
     {
@@ -438,7 +490,7 @@ namespace PULSE
         }
     }
 
-    rapidjson::Document runSqliteQuery(const std::string &db_file, const std::string &query)
+    rapidjson::Document runSqliteQuery(const std::string &db_file, const std::string &query, const std::vector<JsonValue> & values )
     {
         sqlite3 *db = openSqliteDB(db_file);
         sqlite3_stmt *stmt = nullptr;
@@ -466,9 +518,43 @@ namespace PULSE
                     "Prepare failed: " + std::string(sqlite3_errmsg(db)));
             }
 
-            int col_count = sqlite3_column_count(stmt);
 
-            while (sqlite3_step(stmt) == SQLITE_ROW)
+            int col_count = sqlite3_column_count(stmt);
+            uint32_t index = 0;
+            for (const auto &value : values)
+            {
+                index++;
+                if (std::holds_alternative<std::nullptr_t>(value))
+                {
+                   // Logger::instance().log(Logger::Level::DEBUG, std::to_string(index)+"=> null");
+                   sqlite3_bind_null(stmt, index);
+                }
+                else if (std::holds_alternative<std::string>(value)) {
+                    sqlite3_bind_text(stmt, index, std::get<std::string>(value).c_str(), -1, SQLITE_TRANSIENT);
+                  //  Logger::instance().log(Logger::Level::DEBUG, std::to_string(index)+"=> "+ std::get<std::string>(value));
+                }
+                else if (std::holds_alternative<int64_t>(value)) {
+                    sqlite3_bind_int64(stmt, index, std::get<int64_t>(value));
+                   // Logger::instance().log(Logger::Level::DEBUG, std::to_string(index)+"=> "+ std::to_string(std::get<int64_t>(value)));
+                }
+                else if (std::holds_alternative<double>(value)) {
+                    sqlite3_bind_double(stmt, index, std::get<double>(value));
+                   // Logger::instance().log(Logger::Level::DEBUG, std::to_string(index)+"=> "+ std::to_string(std::get<double>(value)));
+                }
+                else if (std::holds_alternative<bool>(value)) {
+                    sqlite3_bind_int(stmt, index, std::get<bool>(value));
+                   // Logger::instance().log(Logger::Level::DEBUG, std::to_string(index)+"=> "+ std::to_string(std::get<bool>(value)));
+                }
+            }
+
+            auto rc = sqlite3_step(stmt);
+
+            if (rc!= SQLITE_ROW && rc != SQLITE_DONE) {
+                throw std::runtime_error(
+                    "Prepare failed: " + std::string(sqlite3_errmsg(db)));
+            } 
+
+            while (rc == SQLITE_ROW)
             {
                 rapidjson::Value row(rapidjson::kObjectType);
 
@@ -518,6 +604,7 @@ namespace PULSE
                 }
 
                 doc.PushBack(row, allocator);
+                rc = sqlite3_step(stmt);
             }
             close_stmt();
             return doc;
@@ -982,22 +1069,22 @@ namespace PULSE
 
             v8::String::Utf8Value str0(args.GetIsolate(), args[0]);
             std::string command = ToCString(str0);
-            bool asyncFlg=false;
-            if(args.Length()==2)
+            bool asyncFlg = false;
+            if (args.Length() == 2)
             {
                 v8::String::Utf8Value str1(args.GetIsolate(), args[1]);
-                 std::string asyncFlgStr = ToCString(str1);
-                 asyncFlg=(asyncFlgStr=="true");
+                std::string asyncFlgStr = ToCString(str1);
+                asyncFlg = (asyncFlgStr == "true");
             }
             std::string response = "Ok";
-            if(asyncFlg)
+            if (asyncFlg)
             {
                 Logger::instance().log(Logger::Level::INFO, "Execute command async...");
-                std::thread cmd_thread([command = std::move(command)]() {
+                std::thread cmd_thread([command = std::move(command)]()
+                                       {
                     Logger::instance().log(Logger::Level::INFO, command.c_str());
-                    system(command.c_str());
-                });
-                
+                    system(command.c_str()); });
+
                 cmd_thread.detach();
             }
             else
@@ -1333,9 +1420,15 @@ namespace PULSE
             if (doc.HasMember("query") && doc["query"].IsString(), doc.HasMember("db") && doc["db"].IsString())
             {
                 std::string dbFileName = doc["db"].GetString();
-                auto dbResp = runSqliteQuery(dbFileName, doc["query"].GetString());
                 rapidjson::StringBuffer buffer;
                 rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+                std::vector<JsonValue> values;
+                if(doc.HasMember("values") && doc["values"].IsArray())
+                {
+                    values = rapidJsonArrayToVector(doc["values"]);
+                }
+               
+                auto dbResp = runSqliteQuery(dbFileName, doc["query"].GetString(),values);
                 dbResp.Accept(writer);
                 std::string response = buffer.GetString();
                 resp = v8::String::NewFromUtf8(isolate, response.c_str(), v8::NewStringType::kNormal).ToLocalChecked();
@@ -1509,40 +1602,41 @@ namespace PULSE
                 throw std::runtime_error("json format error");
             }
 
-            if (action == "chat")
-            {
-                if (doc.HasMember("type") && doc["type"].IsString() &&
-                    doc.HasMember("api_key") && doc["api_key"].IsString() &&
-                    doc.HasMember("user_message") && doc["user_message"].IsString() &&
-                    doc.HasMember("system_message") && doc["system_message"].IsString())
-                {
-                    uint32_t tempreture = 0;
-                    if (doc.HasMember("tempreture") && doc["tempreture"].IsNumber())
-                        tempreture = doc["tempreture"].GetUint64();
-                    std::shared_ptr<ChatResponse> response;
-                    std::string type = doc["type"].GetString();
-                    if (type == "gpt")
-                    {
-                        std::shared_ptr<OpenAIClient> gptClient = std::make_shared<OpenAIClient>(doc["api_key"].GetString(), tempreture, "gpt-4.1-mini");
-                        response = std::make_shared<ChatResponse>(gptClient->singleChat(doc["user_message"].GetString(), doc["system_message"].GetString()));
-                    }
-                    else if (type == "deepseek")
-                    {
-                        std::shared_ptr<DeepSeekClient> dsClient = std::make_shared<DeepSeekClient>(doc["api_key"].GetString(), tempreture, "deepseek-chat");
-                        response = std::make_shared<ChatResponse>(dsClient->singleChat(doc["user_message"].GetString(), doc["system_message"].GetString()));
-                    }
-                    if (!response->success)
-                    {
-                        throw std::runtime_error(response->error_message.c_str());
-                    }
-                    resp = v8::String::NewFromUtf8(isolate, response->content.c_str(), v8::NewStringType::kNormal).ToLocalChecked();
-                }
-                else
-                {
-                    throw std::runtime_error("wrong request json format");
-                }
-            }
-            else if (action == "server")
+            /* if (action == "chat")
+             {
+                 if (doc.HasMember("type") && doc["type"].IsString() &&
+                     doc.HasMember("api_key") && doc["api_key"].IsString() &&
+                     doc.HasMember("user_message") && doc["user_message"].IsString() &&
+                     doc.HasMember("system_message") && doc["system_message"].IsString())
+                 {
+                     uint32_t tempreture = 0;
+                     if (doc.HasMember("tempreture") && doc["tempreture"].IsNumber())
+                         tempreture = doc["tempreture"].GetUint64();
+                     std::shared_ptr<ChatResponse> response;
+                     std::string type = doc["type"].GetString();
+                     if (type == "gpt")
+                     {
+                         std::shared_ptr<OpenAIClient> gptClient = std::make_shared<OpenAIClient>(doc["api_key"].GetString(), tempreture, "gpt-4.1-mini");
+                         response = std::make_shared<ChatResponse>(gptClient->singleChat(doc["user_message"].GetString(), doc["system_message"].GetString()));
+                     }
+                     else if (type == "deepseek")
+                     {
+                         std::shared_ptr<DeepSeekClient> dsClient = std::make_shared<DeepSeekClient>(doc["api_key"].GetString(), tempreture, "deepseek-chat");
+                         response = std::make_shared<ChatResponse>(dsClient->singleChat(doc["user_message"].GetString(), doc["system_message"].GetString()));
+                     }
+                     if (!response->success)
+                     {
+                         throw std::runtime_error(response->error_message.c_str());
+                     }
+                     resp = v8::String::NewFromUtf8(isolate, response->content.c_str(), v8::NewStringType::kNormal).ToLocalChecked();
+                 }
+                 else
+                 {
+                     throw std::runtime_error("wrong request json format");
+                 }
+             }
+             else */
+            if (action == "server")
             {
                 if (doc.HasMember("port") && doc["port"].IsUint())
                 {
@@ -2889,6 +2983,7 @@ namespace PULSE
                             {
                                 if(req->is_mime)
                                 {
+                                    struct curl_slist* headers = nullptr;
                                     curl_mime *mime = curl_mime_init(curl);
                                     curl_mimepart *part = nullptr;
                                     try
@@ -2944,6 +3039,14 @@ namespace PULSE
                                                     }
                                                 }
                                             }
+
+                                            for (auto &header : req->headers)
+                                            {
+                                                std::string ct=header.first+": "+header.second;
+                                                headers = curl_slist_append(headers, ct.c_str());
+                                            }
+                                
+                                            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
                                             
                                             
                                             std::string finalUrl = (*(req->url.get()));
@@ -2951,6 +3054,8 @@ namespace PULSE
                                             curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
                                             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
                                             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+                                           // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+                                            //curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, debug_callback);
 
                                            // Logger::instance().log(Logger::Level::DEBUG,"Service Url:"+ finalUrl);
                                            // Logger::instance().log(Logger::Level::DEBUG,"Service Request:"+ (*(req->request.get())));
@@ -2993,7 +3098,7 @@ namespace PULSE
                                     }
                                 
 
-                                    if(req->method==2)
+                                    if(req->method==2)//get
                                     {
                                         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
                                         if(req->request!=nullptr && req->request->length()>0)
@@ -3001,7 +3106,7 @@ namespace PULSE
                                             query = jsonToQueryParamsEncoded(*(req->request.get())); 
                                         }
                                     }
-                                    else
+                                    else if(req->method==1)//post
                                     {
                                         curl_easy_setopt(curl, CURLOPT_POST, 1L);
                                         
@@ -3011,8 +3116,35 @@ namespace PULSE
                                         }
                                         
                                     }
-                                    
-                                    for(auto &header:req->headers)
+                                    else if(req->method==3)//put
+                                    {
+                                        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+                                        
+                                        if(req->request!=nullptr && req->request->length()>0)
+                                        {
+                                            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (*(req->request.get())).c_str());
+                                        }
+                                        
+                                    }
+                                    else if(req->method==4)//delete
+                                    {
+                                        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+                                        if(req->request!=nullptr && req->request->length()>0)
+                                        {
+                                            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (*(req->request.get())).c_str());
+                                        }
+                                        
+                                    }
+                                    else if(req->method==5)//patch
+                                    {
+                                        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
+                                        if(req->request!=nullptr && req->request->length()>0)
+                                        {
+                                            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (*(req->request.get())).c_str());
+                                        }
+                                        
+                                    }
+                                    for (auto &header : req->headers)
                                     {
                                         std::string ct=header.first+": "+header.second;
                                         headers = curl_slist_append(headers, ct.c_str());
@@ -3023,9 +3155,9 @@ namespace PULSE
                                     std::string finalUrl = (*(req->url.get()));
                                     if(query.length()>0) finalUrl+="?"+query;
                                     
-                                    Logger::instance().log(Logger::Level::DEBUG,"Service Url:"+ finalUrl);
-                                    Logger::instance().log(Logger::Level::DEBUG,"Service Request:"+ (*(req->request.get())));
-                                    Logger::instance().log(Logger::Level::DEBUG,"Service Timeout:"+ std::to_string((long) req->time_out.count()));
+                                    //Logger::instance().log(Logger::Level::DEBUG,"Service Url:"+ finalUrl);
+                                    //Logger::instance().log(Logger::Level::DEBUG,"Service Request:"+ (*(req->request.get())));
+                                    //Logger::instance().log(Logger::Level::DEBUG,"Service Timeout:"+ std::to_string((long) req->time_out.count()));
 
                                     curl_easy_setopt(curl, CURLOPT_URL, finalUrl.c_str());
                                     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
@@ -3034,6 +3166,8 @@ namespace PULSE
                                     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long) req->time_out.count());
                                     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long) req->time_out.count());
                                     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+                                    //curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+                                    //curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, debug_callback);
                                 
 
                                     CURLcode res = curl_easy_perform(curl);
@@ -3639,29 +3773,31 @@ namespace PULSE
 
         cleaner_ = std::jthread([&]
                                 {
-            while(running_.load())
-            {
-                for (auto it = request_worker_->begin(); it != request_worker_->end(); ) 
-                {
-                    if (it->done->load()) {
-                        it = request_worker_->erase(it);
-                    } else {
-                        ++it;
-                    }
-                }
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            } 
-            for (auto it = request_worker_->begin(); it != request_worker_->end(); ) 
-            {
-                it = request_worker_->erase(it);
-            }
+                                    while (running_.load())
+                                    {
+                                        for (auto it = request_worker_->begin(); it != request_worker_->end();)
+                                        {
+                                            if (it->done->load())
+                                            {
+                                                it = request_worker_->erase(it);
+                                            }
+                                            else
+                                            {
+                                                ++it;
+                                            }
+                                        }
+                                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                                    }
+                                    for (auto it = request_worker_->begin(); it != request_worker_->end();)
+                                    {
+                                        it = request_worker_->erase(it);
+                                    }
 
-            for (auto it = queue_consumer_->begin(); it != queue_consumer_->end(); ) 
-            {
-                it = queue_consumer_->erase(it);
-            }
-        
-        });
+                                    for (auto it = queue_consumer_->begin(); it != queue_consumer_->end();)
+                                    {
+                                        it = queue_consumer_->erase(it);
+                                    }
+                                });
 
         for (int i = 0; i < 5; ++i)
         {
