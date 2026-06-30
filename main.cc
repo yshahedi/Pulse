@@ -1,6 +1,6 @@
 #include "pulse.h"
-#include "deepseek.h"
-#include "gpt.h"
+//#include "deepseek.h"
+//#include "gpt.h"
 #include <iostream>
 #include <memory>
 #include <unistd.h>
@@ -15,6 +15,7 @@
 #include "MyString.h"
 #include <fstream>
 #include <sstream>
+//#include "switch.h"
 
 uint32_t maxServerId = 0;
 std::string lockFileName = "";
@@ -75,6 +76,7 @@ static void daemonize(std::string lockFile)
         exit(0);
     }
 
+    snprintf(str, sizeof(str), "%d\n", getpid());
     write(lfp, str, strlen(str)); /* record pid to lockfile */
     signal(SIGCHLD, SIG_IGN);     /* ignore child */
     signal(SIGTSTP, SIG_IGN);     /* ignore tty signals */
@@ -88,6 +90,7 @@ static void daemonize(std::string lockFile)
 
 int main(int argc, char *argv[])
 {
+
 
     if (argc < 2)
     {
@@ -158,6 +161,7 @@ int main(int argc, char *argv[])
             PULSE::Scheduler::getInstance().start();
             std::this_thread::sleep_for(std::chrono::seconds(1));
             PULSE::Run(argv[2]);
+
 
             while (true)
             {

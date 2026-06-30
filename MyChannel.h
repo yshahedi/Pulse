@@ -101,6 +101,14 @@ public:
 			return false;
 		}
 
+		// Woken with an empty queue (e.g. Finish() set finish_processing during
+		// shutdown). Returning false makes the consumer exit instead of popping
+		// an empty queue (undefined behavior).
+		if (q.empty()) {
+			DecreaseSyncCounter();
+			return false;
+		}
+
 		item = std::move(q.front());
 		q.pop();
 

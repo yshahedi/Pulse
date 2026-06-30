@@ -1,4 +1,5 @@
 #include "pulse.h"
+#include "metrics.h"
 
 #include <uuid/uuid.h>
 #include <sys/stat.h>
@@ -202,6 +203,7 @@ namespace PULSE
             req->request = std::make_unique<std::string>("{\"token\":\"" + MyV8::getInstance().getToken() + "\"}");
             req->url = std::make_unique<std::string>("/");
             req->headers = std::make_unique<std::string>("");
+            req->method = std::make_unique<std::string>("");
             std::future<std::string> future = req->response.get_future();
             MyV8::getInstance().produce(std::move(req));
             auto status = future.wait_for(timeout);
@@ -219,7 +221,7 @@ namespace PULSE
         }
     }
 
-    /*std::shared_ptr<mysqlx::Client> GetConnection(std::string username, std::string password, std::string host, std::string schema, int port, int poolSize, int poolTimeout)
+    std::shared_ptr<mysqlx::Client> GetConnection(std::string username, std::string password, std::string host, std::string schema, int port, int poolSize, int poolTimeout)
     {
         return std::make_shared<mysqlx::Client>(
             mysqlx::SessionOption::USER, username, mysqlx::SessionOption::PWD, password, mysqlx::SessionOption::HOST, host,
@@ -311,7 +313,7 @@ namespace PULSE
         rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
         recordList.Accept(writer);
         response = std::string(buffer.GetString(), buffer.GetSize());
-    }*/
+    }
 
     std::string ReadFile(const std::string &filePath, bool throwException)
     {
@@ -437,10 +439,27 @@ namespace PULSE
 
     sqlite3 *openSqliteDB(const std::string &db_file)
     {
-        static sf::safe_ptr<std::map<std::string, sqlite3 *>> connections;
+        // Per-worker (per-thread) connection cache. Each worker thread owns its
+        // OWN sqlite3* per db file, so SQLite transaction state (BEGIN/COMMIT) is
+        // private to the thread and concurrent workers can never corrupt each
+        // other's transactions. WAL mode allows concurrent readers across
+        // connections; busy_timeout makes concurrent writers wait for the write
+        // lock instead of failing with SQLITE_BUSY. Connections are closed when
+        // the worker thread exits (ConnCache destructor).
+        struct ConnCache
+        {
+            std::map<std::string, sqlite3 *> conns;
+            ~ConnCache()
+            {
+                for (auto &kv : conns)
+                    if (kv.second)
+                        sqlite3_close(kv.second);
+            }
+        };
+        static thread_local ConnCache cache;
 
-        auto it = connections->find(db_file);
-        if (it != connections->end())
+        auto it = cache.conns.find(db_file);
+        if (it != cache.conns.end())
         {
             return it->second;
         }
@@ -471,16 +490,24 @@ namespace PULSE
                 "PRAGMA temp_store=MEMORY;",
                 nullptr, nullptr, nullptr);
 
+            // Smaller per-connection page cache: with one connection per worker
+            // there can be many connections, so keep each modest (~2 MB) to bound
+            // total memory instead of the 20 MB used by a single shared handle.
             sqlite3_exec(
                 db,
-                "PRAGMA cache_size=-20000;",
+                "PRAGMA cache_size=-2000;",
                 nullptr, nullptr, nullptr);
 
             sqlite3_exec(
                 db,
                 "PRAGMA synchronous=NORMAL;",
                 nullptr, nullptr, nullptr);
-            connections->emplace(db_file, db);
+
+            // Wait (instead of erroring) up to 5s if another worker holds the
+            // write lock — WAL serializes writers, this just makes them queue.
+            sqlite3_busy_timeout(db, 5000);
+
+            cache.conns.emplace(db_file, db);
             return db;
         }
         catch (...)
@@ -662,6 +689,8 @@ namespace PULSE
                     request->headers = doc["headers"].GetString();
                 if (doc.HasMember("timeout") && doc["timeout"].IsUint())
                     request->timeout = doc["timeout"].GetUint();
+                if (doc.HasMember("method") && doc["method"].IsString())
+                    request->method = doc["method"].GetString();
                 MyV8::getInstance().queue_.Produce(std::move(request));
                 std::string response = "OK";
                 resp = v8::String::NewFromUtf8(isolate, response.c_str(), v8::NewStringType::kNormal).ToLocalChecked();
@@ -814,8 +843,8 @@ namespace PULSE
             }
             if (args.Length() >= 3)
             {
-                v8::String::Utf8Value str1(args.GetIsolate(), args[1]);
-                std::string force = ToCString(str1);
+                v8::String::Utf8Value str2(args.GetIsolate(), args[2]);
+                std::string force = ToCString(str2);
                 isForce = (force == "true");
             }
             std::string response = "OK";
@@ -924,6 +953,7 @@ namespace PULSE
             req->request = std::make_unique<std::string>("{}");
             req->url = std::make_unique<std::string>("/");
             req->headers = std::make_unique<std::string>("");
+            req->method = std::make_unique<std::string>("");
             std::future<std::string> future = req->response.get_future();
             MyV8::getInstance().produce(std::move(req));
             auto status = future.wait_for(timeout);
@@ -1108,7 +1138,7 @@ namespace PULSE
         return;
     }
 
-    /*void Connect(const v8::FunctionCallbackInfo<v8::Value> &args)
+    void Connect(const v8::FunctionCallbackInfo<v8::Value> &args)
     {
         v8::Isolate *isolate = args.GetIsolate();
         v8::HandleScope scope(isolate);
@@ -1189,7 +1219,7 @@ namespace PULSE
 
         args.GetReturnValue().Set(resp);
         return;
-    }*/
+    }
 
     void CallService(const v8::FunctionCallbackInfo<v8::Value> &args)
     {
@@ -1417,7 +1447,7 @@ namespace PULSE
                 throw std::runtime_error("json format error");
             }
 
-            if (doc.HasMember("query") && doc["query"].IsString(), doc.HasMember("db") && doc["db"].IsString())
+            if (doc.HasMember("query") && doc["query"].IsString() && doc.HasMember("db") && doc["db"].IsString())
             {
                 std::string dbFileName = doc["db"].GetString();
                 rapidjson::StringBuffer buffer;
@@ -1688,7 +1718,7 @@ namespace PULSE
                     if (doc.HasMember("timeout") && doc["timeout"].IsNumber())
                         timeout = doc["timeout"].GetUint64();
                     if (doc.HasMember("method") && doc["method"].IsNumber())
-                        timeout = doc["method"].GetUint();
+                        method = doc["method"].GetUint();
                     if (doc.HasMember("architectural_style") && doc["architectural_style"].IsNumber())
                         architectural_style = doc["architectural_style"].GetUint();
                     if (doc.HasMember("schema") && doc["schema"].IsString())
@@ -2052,6 +2082,19 @@ namespace PULSE
                     throw std::runtime_error("wrong request json format");
                 }
             }
+            else if (action == "get_metrics")
+            {
+                std::string snap = pmetrics::snapshot_json();
+                resp = v8::String::NewFromUtf8(isolate, snap.c_str(), v8::NewStringType::kNormal).ToLocalChecked();
+            }
+            else if (action == "start_metrics")
+            {
+                int port = 4002;
+                if (doc.HasMember("port") && doc["port"].IsUint())
+                    port = doc["port"].GetUint();
+                pmetrics::start_server(port);
+                resp = v8::String::NewFromUtf8(isolate, "OK", v8::NewStringType::kNormal).ToLocalChecked();
+            }
             else
             {
                 throw std::runtime_error("action not found");
@@ -2112,18 +2155,21 @@ namespace PULSE
                         //Logger::instance().log(Logger::Level::DEBUG,"Loop Defer "+std::to_string(index)+"...");
                         const auto timeNow = std::chrono::system_clock::now();
                         const std::time_t dateTimeNow = std::chrono::system_clock::to_time_t(timeNow);
+                        server_.busy++;
                         if(server_.busy>=request_worker_->size() && server_.busy<=server_.max_request_worker)
                         {
-                            addNewRequestWorker();    
-                            //request_queue_.Produce(std::move(req)); 
-                            //return;           
+                            addNewRequestWorker();
+                            //request_queue_.Produce(std::move(req));
+                            //return;
                         }
-                        server_.busy++;
+
+                        pmetrics::Scope _ms(pmetrics::POOL_INBOUND);
+
                         std::string response;
                         std::string error_response;
                         uint32_t duration = 0;
                         uint32_t apiId;
-                        uint32_t methodId;
+                        //uint32_t methodId;
                         try {
                             if(request->url==nullptr)
                             {
@@ -2137,13 +2183,17 @@ namespace PULSE
                             {
                                 request->headers=std::make_unique<std::string>("");
                             }
+                            if(request->method==nullptr)
+                            {
+                                request->method=std::make_unique<std::string>("");
+                            }
                             auto it = server_.api->find(*(request->url.get()));
                             if(it==server_.api->end())
                             {
                                 throw std::runtime_error("Rout not found");
                             }
                             apiId = it->second.id;
-                            methodId=it->second.method;
+                            //methodId=it->second.method;
                             std::unique_ptr<JsRequestData> req=std::make_unique<JsRequestData>(std::chrono::milliseconds(it->second.timeout));
                             std::string func="api_"+std::to_string(it->second.id);
                             req->function_name=std::make_unique<std::string>(std::move(func));
@@ -2178,6 +2228,7 @@ namespace PULSE
                             req->request=std::make_unique<std::string>(*(request->body.get()));
                             req->headers=std::make_unique<std::string>(*(request->headers.get()));
                             req->url=std::make_unique<std::string>(*(request->url.get()));
+                            req->method=std::make_unique<std::string>(*(request->method.get()));
                             std::future<std::string> future = req->response.get_future();
                             auto timeout = req->time_out;
                             //Logger::instance().log(Logger::Level::DEBUG,"Produce V8 From Inbound "+std::to_string(index)+"...");
@@ -2236,7 +2287,7 @@ namespace PULSE
                                             if (request->is_https) {
                                                 request->https_response->writeHeader(item["key"].GetString(), item["value"].GetString());
                                             } else {
-                                                request->http_response->writeHeader("Content-Type", "application/json");
+                                                request->http_response->writeHeader(item["key"].GetString(), item["value"].GetString());
                                             }
                                         }
                                     }
@@ -2288,8 +2339,9 @@ namespace PULSE
                             
                         }
                         catch (const std::exception& e) {
+                            _ms.fail();
                             Logger::instance().log(Logger::Level::ERROR, e.what());
-                            
+
                             error_response = "{\"error\": \"";
                             error_response+=e.what();
                             error_response+="\"}";
@@ -2317,8 +2369,9 @@ namespace PULSE
                         }
                         catch(...)
                         {
+                            _ms.fail();
                             Logger::instance().log(Logger::Level::ERROR, "Error processing request in thread: unknown error");
-                            
+
                             error_response = R"({"error": "Internal server error"})";
                             if(request->protocol==1 || request->protocol==2 )
                             {
@@ -2509,14 +2562,29 @@ namespace PULSE
 
             app.options("/*", [](auto *res, auto *req)
                         {
+                    std::string reqHeaders;
+
+                    if (auto hdr = req->getHeader("access-control-request-headers"); !hdr.empty()) {
+                        reqHeaders = std::string(hdr);
+                    }
+
                     res->writeHeader("Access-Control-Allow-Origin", "*");
                     res->writeHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-                    res->writeHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-                    res->end(); });
+
+                    if (!reqHeaders.empty()) {
+                        res->writeHeader("Access-Control-Allow-Headers", reqHeaders);
+                    } else {
+                        res->writeHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+                    }
+
+                    res->writeStatus("204 No Content");
+                    res->end();
+                
+                });
 
             app.any("/*", [this](auto *res, auto *req)
                     {
-                        //Logger::instance().log(Logger::Level::DEBUG,"New Reuest...");
+                        
                         auto it = server_.api->find(std::string(req->getUrl()));
                         if(it==server_.api->end())
                         {
@@ -2544,24 +2612,36 @@ namespace PULSE
                             listen_worker_->push_back(std::jthread(&InboundServer::run_server, this));
                         }
 
+                    std::unique_ptr<std::string> headers = std::make_unique<std::string>("");
+                        *headers += "{";
+                        for (auto [key, value] : *req)
+                        {
+                            //Logger::instance().log(Logger::Level::DEBUG,std::string(key));
+                            //Logger::instance().log(Logger::Level::DEBUG,std::string(value));
+                            *headers +="\"";
+                            *headers +=key;
+                            *headers +="\":\"";
+                            *headers +=replaceSubStringCopy(std::string(value),"\"","\\\"");
+                            *headers +="\",";
+                        }
+                        if ((*headers).ends_with(',')) {
+                            (*headers).pop_back();
+                        }
+                        *headers += "}";
+
                     std::unique_ptr<std::string> body;                
                     std::unique_ptr<std::string> url =std::make_unique<std::string>(std::string(req->getUrl()));
-                    res->onData([this, res, req,url=std::move(url), body = std::move(body)]
+                    std::unique_ptr<std::string> method =std::make_unique<std::string>(std::string(req->getMethod()));
+                    res->onData([this, res, headers=std::move(headers),url=std::move(url), body = std::move(body),method = std::move(method)]
                             (std::string_view data, bool last) mutable {
                         if (!body.get()) {
                             body=std::make_unique<std::string>("");
                         }
                         body->append(data);
-                        if (last) {
-                            std::unique_ptr<std::string> headers = std::make_unique<std::string>("");
-                            for (auto [key, value] : *req) {
-                                *headers +=key;
-                                *headers +=":";
-                                *headers +=value;
-                                *headers +="|";
-                            }
+                        if (last) { 
                             std::unique_ptr<RequestData> request =std::make_unique<RequestData>();
                             request->url =std::move(url);
+                            request->method =std::move(method);
                             request->body = std::move(body);
                             request->http_response = res;
                             request->is_https =false;
@@ -2569,8 +2649,9 @@ namespace PULSE
                             request->loop = uWS::Loop::get();
                             //Logger::instance().log(Logger::Level::DEBUG,"GET REQUEST");
                             //Logger::instance().log(Logger::Level::DEBUG, *request->body);
+                            //Logger::instance().log(Logger::Level::DEBUG, *request->headers);
                                 request_queue_.Produce(std::move(request)); 
-                                //Logger::instance().log(Logger::Level::DEBUG,"AFTER PRODUCE");
+                            //Logger::instance().log(Logger::Level::DEBUG,"AFTER PRODUCE.");
                             
                         }
                     });
@@ -2593,12 +2674,19 @@ namespace PULSE
                                          {
 
                     std::string headers="";
-                    for (auto [key, value] : *req) {
-                                headers +=key;
-                                headers +=":";
-                                headers +=value;
-                                headers +="|";
-                            }
+                    headers += "{";
+                    for (auto [key, value] : *req)
+                    {
+                        headers +="\"";
+                        headers +=key;
+                        headers +="\":\"";
+                        headers +=replaceSubStringCopy(std::string(value),"\"","\\\"");
+                        headers +="\",";
+                    }
+                    if ((headers).ends_with(',')) {
+                        (headers).pop_back();
+                    }
+                    headers += "}";
                     res->template upgrade<PerSocketData>({
                         .headers = headers
                     }, req->getHeader("sec-websocket-key"),
@@ -2636,6 +2724,7 @@ namespace PULSE
 
                                              std::unique_ptr<RequestData> request = std::make_unique<RequestData>();
                                              request->token = std::make_unique<std::string>(data->token);
+                                             request->method= std::make_unique<std::string>("ws");
                                              request->body = std::make_unique<std::string>(message);
                                              request->ws = ws;
                                              request->is_https = false;
@@ -2680,10 +2769,24 @@ namespace PULSE
 
             app.options("/*", [](auto *res, auto *req)
                         {
+                    std::string reqHeaders;
+
+                    if (auto hdr = req->getHeader("access-control-request-headers"); !hdr.empty()) {
+                        reqHeaders = std::string(hdr);
+                    }
+
                     res->writeHeader("Access-Control-Allow-Origin", "*");
                     res->writeHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-                    res->writeHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-                    res->end(); });
+
+                    if (!reqHeaders.empty()) {
+                        res->writeHeader("Access-Control-Allow-Headers", reqHeaders);
+                    } else {
+                        res->writeHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+                    }
+
+                    res->writeStatus("204 No Content");
+                    res->end();
+                });
 
             app.any("/*", [this](auto *res, auto *req)
                     {
@@ -2711,24 +2814,36 @@ namespace PULSE
                             listen_worker_->push_back(std::jthread(&InboundServer::run_ssl_server, this));
                         }
 
+                        std::unique_ptr<std::string> headers = std::make_unique<std::string>("");
+                        *headers += "{";
+                        for (auto [key, value] : *req)
+                        {
+                            //Logger::instance().log(Logger::Level::DEBUG,std::string(key));
+                            //Logger::instance().log(Logger::Level::DEBUG,std::string(value));
+                            *headers +="\"";
+                            *headers +=key;
+                            *headers +="\":\"";
+                            *headers +=replaceSubStringCopy(std::string(value),"\"","\\\"");
+                            *headers +="\",";
+                        }
+                        if ((*headers).ends_with(',')) {
+                            (*headers).pop_back();
+                        }
+                        *headers += "}";
+
                     std::unique_ptr<std::string> body;
                     std::unique_ptr<std::string> url =std::make_unique<std::string>(std::string(req->getUrl()));
-                    res->onData([this, res, req,url=std::move(url), body = std::move(body)]
+                    std::unique_ptr<std::string> method =std::make_unique<std::string>(std::string(req->getMethod()));
+                    res->onData([this, res, headers=std::move(headers),url=std::move(url), body = std::move(body),method = std::move(method)]
                             (std::string_view data, bool last) mutable {
                         if (!body.get()) {
                             body=std::make_unique<std::string>("");
                         }
                         body->append(data);
                         if (last) {
-                            std::unique_ptr<std::string> headers = std::make_unique<std::string>("");
-                            for (auto [key, value] : *req) {
-                                *headers +=key;
-                                *headers +=":";
-                                *headers +=value;
-                                *headers +="|";
-                            }
                             std::unique_ptr<RequestData> request =std::make_unique<RequestData>();
                             request->url =std::move(url);
+                            request->method =std::move(method);
                             request->body = std::move(body);
                             request->https_response = res;
                             request->is_https =true;
@@ -2759,12 +2874,19 @@ namespace PULSE
                                          {
 
                     std::string headers="";
-                    for (auto [key, value] : *req) {
-                                headers +=key;
-                                headers +=":";
-                                headers +=value;
-                                headers +="|";
-                            }
+                    headers += "{";
+                    for (auto [key, value] : *req)
+                    {
+                        headers +="\"";
+                        headers +=key;
+                        headers +="\":\"";
+                        headers +=replaceSubStringCopy(std::string(value),"\"","\\\"");
+                        headers +="\",";
+                    }
+                    if ((headers).ends_with(',')) {
+                        (headers).pop_back();
+                    }
+                    headers += "}";
                     res->template upgrade<PerSocketData>({
                         .headers = headers
                     }, req->getHeader("sec-websocket-key"),
@@ -2803,6 +2925,7 @@ namespace PULSE
                                              std::unique_ptr<RequestData> request = std::make_unique<RequestData>();
                                              request->token = std::make_unique<std::string>(data->token);
                                              request->body = std::make_unique<std::string>(message);
+                                             request->method= std::make_unique<std::string>("ws");
                                              request->wss = ws;
                                              request->is_https = true;
                                              request->protocol = 3;
@@ -2960,13 +3083,16 @@ namespace PULSE
                     std::string response;
                     std::string query="";
                     uint32_t duration=0;
-                    if(busy_>=request_worker_->size() && busy_<=max_worker_count_) 
+                    busy_++;
+                    if(busy_>=request_worker_->size() && busy_<=max_worker_count_)
                     {
                         addNewRequestWorker();
-                        request_queue_.Produce(std::move(req));
-                        continue;
+                        //request_queue_.Produce(std::move(req));
+                        //continue;
                     }
-                    busy_++;
+
+                    pmetrics::Scope _ms(pmetrics::POOL_OUTBOUND);
+
                     try
                     {
                         if(req->protocol==1 || req->protocol==2)
@@ -3075,13 +3201,15 @@ namespace PULSE
                                             else
                                             {
                                                 throw std::runtime_error("call service error!"+std::string(curl_easy_strerror(res)));
-                                            } 
-                                            curl_mime_free(mime); 
+                                            }
+                                            curl_slist_free_all(headers);
+                                            curl_mime_free(mime);
                                         }
                                         catch (...) {
-                                            curl_mime_free(mime); 
+                                            curl_slist_free_all(headers);
+                                            curl_mime_free(mime);
                                             throw;
-                                        } 
+                                        }
                                         
                                 }
                                 else
@@ -3473,6 +3601,7 @@ namespace PULSE
 
     void Outbound::produce(std::unique_ptr<OutboundRequestData> req)
     {
+        pmetrics::enqueue(pmetrics::POOL_OUTBOUND);
         request_queue_.Produce(std::move(req));
     }
 
@@ -3571,10 +3700,10 @@ namespace PULSE
                     context,
                     v8::String::NewFromUtf8(isolate, "System").ToLocalChecked(),
                     v8::Function::New(context, System).ToLocalChecked());
-                /*tmp = context->Global()->Set(
+                tmp = context->Global()->Set(
                     context,
-                    v8::String::NewFromUtf8(isolate, "GetQuery").ToLocalChecked(),
-                    v8::Function::New(context, GetQuery).ToLocalChecked());*/
+                    v8::String::NewFromUtf8(isolate, "GetMysqlQuery").ToLocalChecked(),
+                    v8::Function::New(context, GetQuery).ToLocalChecked());
                 tmp = context->Global()->Set(
                     context,
                     v8::String::NewFromUtf8(isolate, "CreateFile").ToLocalChecked(),
@@ -3587,10 +3716,10 @@ namespace PULSE
                     context,
                     v8::String::NewFromUtf8(isolate, "ReadFile").ToLocalChecked(),
                     v8::Function::New(context, ReadFile).ToLocalChecked());
-                /*tmp = context->Global()->Set(
+                tmp = context->Global()->Set(
                     context,
-                    v8::String::NewFromUtf8(isolate, "Connect").ToLocalChecked(),
-                    v8::Function::New(context, Connect).ToLocalChecked());*/
+                    v8::String::NewFromUtf8(isolate, "MysqlConnect").ToLocalChecked(),
+                    v8::Function::New(context, Connect).ToLocalChecked());
                 tmp = context->Global()->Set(
                     context,
                     v8::String::NewFromUtf8(isolate, "CallService").ToLocalChecked(),
@@ -3648,7 +3777,7 @@ namespace PULSE
                 {
                     if(!running_.load())
                     {
-                        request_queue_.Produce(std::move(req));
+                        if(req!=nullptr) request_queue_.Produce(std::move(req));
                         break;
                     }
                     if (req == nullptr)
@@ -3661,13 +3790,15 @@ namespace PULSE
                         request_queue_.Produce(std::move(req));
                         break;
                     }
+                    busy_++;
                     if (busy_ >= request_worker_->size() && busy_ <= maxWorker)
                     {
-                        request_queue_.Produce(std::move(req));
+                        //request_queue_.Produce(std::move(req));
                         addNewRequestWorker();
-                        continue;
+                        //continue;
                     }
-                    busy_++;
+
+                    pmetrics::Scope _ms(pmetrics::POOL_JS);
 
                     v8::HandleScope handle_scope(isolate);
                     v8::TryCatch try_catch(isolate);
@@ -3689,23 +3820,28 @@ namespace PULSE
                         {
                             req->url = std::make_unique<std::string>("");
                         }
+                        if (req->method == nullptr)
+                        {
+                            req->method = std::make_unique<std::string>("");
+                        }
                         auto it = gfn.find(*(req->function_name.get()));
                         if (it == gfn.end())
                         {
                             throw std::runtime_error("JS function not found!:"+(*(req->function_name.get())));
                         }
                         v8::Local<v8::Function> fn = it->second.Get(isolate);
-                        v8::Local<v8::Value> args[1];
+                        v8::Local<v8::Value> args[4];
                         args[0] = v8::String::NewFromUtf8(isolate, req->request->c_str()).ToLocalChecked();
                         args[1] = v8::String::NewFromUtf8(isolate, req->url->c_str()).ToLocalChecked();
                         args[2] = v8::String::NewFromUtf8(isolate, req->headers->c_str()).ToLocalChecked();
+                        args[3] = v8::String::NewFromUtf8(isolate, req->method->c_str()).ToLocalChecked();
 
                         std::atomic<bool> finished{false};
                         std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + req->time_out;
                         startInterruptTimer(isolate, &deadline, finished);
 
                         v8::Local<v8::Value> result;
-                        if (!fn->Call(context, context->Global(), 3, args).ToLocal(&result))
+                        if (!fn->Call(context, context->Global(), 4, args).ToLocal(&result))
                         {
                             finished = true;
                             if (try_catch.HasTerminated())
@@ -3727,6 +3863,7 @@ namespace PULSE
                     }
                     catch (const std::exception &e)
                     {
+                        _ms.fail();
                         std::string responseJson = "{\"headers\":[],\"error_code\":-1,\"error_desc\":\"";
                         responseJson += e.what();
                         responseJson += "\"}";
@@ -3734,6 +3871,7 @@ namespace PULSE
                     }
                     catch (...)
                     {
+                        _ms.fail();
                         std::string responseJson = "{\"headers\":[],\"error_code\":-1,\"error_desc\":\"Unknown Error\"}";
                         req->response.set_value(responseJson);
                     }
@@ -3750,6 +3888,7 @@ namespace PULSE
             {
                 break;
             }
+            //Logger::instance().log(Logger::Level::INFO, "Reinit JS Thread Index #"+std::to_string(index));
         } 
         done->store(true); 
         Logger::instance().log(Logger::Level::INFO, "Killed JS Thread Index #"+std::to_string(index)); }, mt.done);
@@ -3788,6 +3927,11 @@ namespace PULSE
                                         }
                                         std::this_thread::sleep_for(std::chrono::seconds(1));
                                     }
+                                    for(auto it = request_worker_->begin(); it != request_worker_->end(); ++it)
+                                    {
+                                        request_queue_.Produce(nullptr);
+                                    }
+                                    std::this_thread::sleep_for(std::chrono::seconds(1));
                                     for (auto it = request_worker_->begin(); it != request_worker_->end();)
                                     {
                                         it = request_worker_->erase(it);
@@ -3825,6 +3969,7 @@ namespace PULSE
                             req->request = std::make_unique<std::string>(item->request);
                             req->url = std::make_unique<std::string>(item->url);
                             req->headers = std::make_unique<std::string>(item->headers);
+                            req->method = std::make_unique<std::string>(item->method);
                             std::future<std::string> future = req->response.get_future();
                             request_queue_.Produce(std::move(req));
                             auto status = future.wait_for(timeout);
@@ -3917,7 +4062,7 @@ namespace PULSE
             functions_->erase(it);
         }
         // CreateFile_(path, std::to_string(id) + ".js", source);
-        std::string tmpSource = "function " + name + "(request,url,request_headers){\nlet inbound=" + std::to_string(inboundId) + ";\n let api=" + std::to_string(id) + ";\nlet response=null;\nlet headers=[];\ntry{\n";
+        std::string tmpSource = "function " + name + "(request,url,request_headers,method){\nlet inbound=" + std::to_string(inboundId) + ";\n let api=" + std::to_string(id) + ";\nlet response=null;\nlet headers=[];\ntry{\n";
         tmpSource += source;
         tmpSource += "\n if (typeof response === 'string') {return JSON.stringify({headers,response});} \nelse\n {return JSON.stringify({headers,response:JSON.stringify(response)});}\n}\ncatch(e){ Log(`" + name + ":${e}`);\nreturn JSON.stringify({headers,error_code:-1,error_desc:`${e}`});}\n};";
         functions_->emplace(name, tmpSource);
@@ -3944,7 +4089,7 @@ namespace PULSE
             functions_->erase(it);
         }
         // CreateFile_(path, name + ".js", source);
-        std::string tmpSource = "function " + name + "(request,url,request_headers){\n let response=null;\nlet headers=[];\ntry{\n";
+        std::string tmpSource = "function " + name + "(request,url,request_headers,method){\n let response=null;\nlet headers=[];\ntry{\n";
         tmpSource += source;
         tmpSource += "\n if (typeof response === 'string') {return JSON.stringify({headers,response});} \nelse\n {return JSON.stringify({headers,response:JSON.stringify(response)});}\n}\ncatch(e){ Log(`" + name + ":${e}`);\nreturn JSON.stringify({headers,error_code:-1,error_desc:`${e}`});}\n};";
         functions_->emplace(name, tmpSource);
@@ -3982,6 +4127,7 @@ namespace PULSE
 
     void MyV8::produce(std::unique_ptr<JsRequestData> req)
     {
+        pmetrics::enqueue(pmetrics::POOL_JS);
         request_queue_.Produce(std::move(req));
     }
 
@@ -4170,6 +4316,8 @@ namespace PULSE
             next += std::chrono::milliseconds(schedulerInfo->interval.load());
             try
             {
+                pmetrics::enqueue(pmetrics::POOL_SCHED);
+                pmetrics::Scope _ms(pmetrics::POOL_SCHED);
                 auto timeout = std::chrono::milliseconds(schedulerInfo->timeout.load());
                 std::unique_ptr<JsRequestData> req=std::make_unique<JsRequestData>(timeout);
                 std::string name = "scheduler_" + std::to_string(id);
@@ -4177,6 +4325,7 @@ namespace PULSE
                 req->request=std::make_unique<std::string>("{}");
                 req->url=std::make_unique<std::string>("/");
                 req->headers=std::make_unique<std::string>("");
+                req->method=std::make_unique<std::string>("");
                 std::future<std::string> future = req->response.get_future();
                 MyV8::getInstance().produce(std::move(req));
                 auto status = future.wait_for(timeout); 
@@ -4275,6 +4424,7 @@ namespace PULSE
                         req->request = std::make_unique<std::string>(msg->str);
                         req->url = std::make_unique<std::string>(token);
                         req->headers = std::make_unique<std::string>("");
+                        req->method = std::make_unique<std::string>("");
                         std::future<std::string> future = req->response.get_future();
                         MyV8::getInstance().produce(std::move(req));
                         auto status = future.wait_for(to);

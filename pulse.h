@@ -30,7 +30,7 @@
 #include <rapidjson/schema.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
-//#include <mysqlx/xdevapi.h>
+#include <mysqlx/xdevapi.h>
 #include <sqlite3.h>
 
 using namespace std;
@@ -65,6 +65,7 @@ namespace PULSE
         std::string request="{}";
         std::string url="";
         std::string headers="[]";
+        std::string method="";
         uint32_t timeout=60000;       
     };
 
@@ -244,6 +245,7 @@ namespace PULSE
     {
     public:
         std::unique_ptr<std::string> url = nullptr;
+        std::unique_ptr<std::string> method = nullptr;
         std::unique_ptr<std::string> body = nullptr;
         std::unique_ptr<std::string> token = nullptr;
         std::unique_ptr<std::string> headers;
@@ -297,6 +299,7 @@ namespace PULSE
         std::unique_ptr<std::string> request = nullptr;
         std::unique_ptr<std::string> headers = nullptr;
         std::unique_ptr<std::string> url = nullptr;
+        std::unique_ptr<std::string> method = nullptr;
         std::promise<std::string> response;
         std::chrono::steady_clock::time_point received_time;
         std::chrono::milliseconds time_out;
@@ -309,8 +312,8 @@ namespace PULSE
     };
 
     extern void Run(std::string jsFileName="");
-    //extern std::shared_ptr<mysqlx::Client> GetConnection(std::string username, std::string password, std::string host, std::string schema, int port = 33060, int poolSize = 7, int poolTimeout = 10000);
-    //extern void Query(const std::string &token, const std::string &query, std::string &response);
+    extern std::shared_ptr<mysqlx::Client> GetConnection(std::string username, std::string password, std::string host, std::string schema, int port = 33060, int poolSize = 7, int poolTimeout = 10000);
+    extern void Query(const std::string &token, const std::string &query, std::string &response);
     extern std::string ReadFile(const std::string& filePath,bool throwException=true);
     extern void CreateFile_(std::string &path, const std::string &filename, const std::string &content);
     extern void RemoveFile_(std::string &path, const std::string &filename);
@@ -328,11 +331,11 @@ namespace PULSE
     extern void System(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void CallService(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void UUID(const v8::FunctionCallbackInfo<v8::Value> &args);
-   // extern void GetQuery(const v8::FunctionCallbackInfo<v8::Value> &args);
+    extern void GetQuery(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void CreateFile(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void ReadFile(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void ReadFileBase64(const v8::FunctionCallbackInfo<v8::Value> &args);
-    //extern void Connect(const v8::FunctionCallbackInfo<v8::Value> &args);
+    extern void Connect(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void GetContext(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void SetContext(const v8::FunctionCallbackInfo<v8::Value> &args);
     extern void Sleep(const v8::FunctionCallbackInfo<v8::Value> &args);
@@ -476,7 +479,7 @@ namespace PULSE
         SafeQueue<std::unique_ptr<QueueData>> queue_;
         sf::safe_ptr<std::map<std::string, std::string>> queue_key_consumer_;
 
-        //sf::safe_ptr<std::map<std::string, std::shared_ptr<mysqlx::Client>>> connections_;
+        sf::safe_ptr<std::map<std::string, std::shared_ptr<mysqlx::Client>>> connections_;
 
     private:
         MyV8();
