@@ -10,4 +10,5 @@ fielList?.split(';')?.forEach(file_name => {
 Authorizer('create_data_model', {});
 Base('create_data_model', {});
 UserInterface('create_data_model', {});
+Admin('create_data_model', {});
 response = ' Functions reloaded successfully';

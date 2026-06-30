@@ -11,7 +11,8 @@ try {
     const modules = {
         authorizer(action, data) { return Authorizer(action, data) },
         base(action, data) { return Base(action, data) },
-        user_interface(action, data) { return UserInterface(action, data) }
+        user_interface(action, data) { return UserInterface(action, data) },
+        admin(action, data) { return Admin(action, data) }
     };
 
     // ── Public actions (no token required) ───────────────────────────────────
@@ -80,6 +81,26 @@ try {
             check_permission:             null,
             get_role_users:               'roles.view',
         },
+        // Admin / DevTools: managing runtime routes, services, schedulers and
+        // operator-written functions is privileged. Admins bypass this entirely;
+        // everyone else needs the matching permission.
+        admin: {
+            get_all:          'admin.view',
+            get:              'admin.view',
+            add:              'admin.edit',
+            edit:             'admin.edit',
+            delete:           'admin.edit',
+            apply_route:      'admin.edit',
+            remove_route:     'admin.edit',
+            apply_service:    'admin.edit',
+            remove_service:   'admin.edit',
+            apply_scheduler:  'admin.edit',
+            remove_scheduler: 'admin.edit',
+            save_function:    'admin.edit',
+            delete_function:  'admin.edit',
+            rebuild_custom:   'admin.edit',
+            boot:             'admin.edit',
+        },
     };
 
     let jwtPayload = null;
@@ -87,7 +108,10 @@ try {
     if (!isPublic) {
         // ── JWT validation ────────────────────────────────────────────────────
         let request_headers_json = JSON.parse(request_headers);
-        let api_key = request_headers_json['x-api-key'];
+        // Token may arrive in the x-api-key header (preferred) or, to keep
+        // browser calls a CORS "simple request" (no preflight), inside the body
+        // as `api_key`/`token`. Header wins when both are present.
+        let api_key = request_headers_json['x-api-key'] || req?.api_key || req?.token;
 
         if (!api_key || api_key === 'null' || api_key === 'undefined') {
             throw new Error('UNAUTHORIZED');

@@ -2339,8 +2339,10 @@ function Base(action, req) {
 
             if (!username || !password) throw 'Username and password required';
 
-            // Query user by username and password
-            const user = Sqlite(db, `SELECT * FROM user_tab WHERE username = ? AND password = ? AND status_id_fk = 1`, [username, password])?.[0];
+            // Query user by username (case-insensitive) and password. Username
+            // matching ignores case so 'ADMIN' and 'admin' resolve to the same
+            // account; the password is still compared exactly.
+            const user = Sqlite(db, `SELECT * FROM user_tab WHERE LOWER(username) = LOWER(?) AND password = ? AND status_id_fk = 1`, [username, password])?.[0];
 
             if (!user) throw 'Invalid username or password';
 

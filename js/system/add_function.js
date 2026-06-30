@@ -34,6 +34,8 @@ function AddFunction_() {
     Serv('add_function', { name: 'Authorizer', file_name: `./js/functions/authorizer.js` });
     Serv('add_function', { name: 'Financial', file_name: `./js/functions/financial.js` });
     Serv('add_function', { name: 'UserInterface', file_name: `./js/functions/user_interface.js` });
+    Serv('add_function', { name: 'Admin', file_name: `./js/functions/admin.js` });
+    Serv('add_function', { name: 'Custom', file_name: `./js/functions/custom.js` });
 
     Log('Add System Function...');
     Serv('add_function', { name: 'AddRoutes_', file_name: `./js/system/add_route.js` });

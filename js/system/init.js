@@ -4,16 +4,26 @@ function Init_() {
     // SetContext("CLAUDE_API_KEY", `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`);
 
     let consumerId = Serv('server', { port: 4001, is_ssl: false, certificate: '', private_key: '' });
+    // Expose the main inbound server id so the Admin module can attach
+    // operator-defined routes to this same server (port 4001) at runtime.
+    SetContext('MAIN_SERVER_ID', `${consumerId}`);
     Serv('route', { route: `api`, server: consumerId, file_name: `./js/routes/api.js`, timeout: (1000 * 60) });
     Serv('route', { route: `reload`, server: consumerId, file_name: `./js/routes/reload.js`, timeout: (1000 * 60) });
 
     Authorizer('create_data_model', {});
     Base('create_data_model', {});
     UserInterface('create_data_model', {});
+    Admin('create_data_model', {});
 
     // Seed default admin user and roles (idempotent — safe to run on every start)
     Base('seed_admin', {});
     Authorizer('seed_admin', {});
+
+    // Re-register every operator-defined route / outbound service / scheduler and
+    // rebuild the Custom() function file from admin.db. This is what makes objects
+    // created in the admin panel survive a stop/start — new definitions persist in
+    // admin.db and auto-load here, so init.js never has to be hand-edited again.
+    Admin('boot', { server: consumerId });
 
     // Start the worker-telemetry WebSocket server (no-op if Pulse was built
     // without -DPULSE_METRICS). Pushes a metrics snapshot to dashboards @500ms.
